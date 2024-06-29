@@ -33,221 +33,145 @@
 // }
 
 
-
-
-
-
-//----------------------------------------------SOLUTION 1-----------------------------------------------------------------
-
-// #include <stdio.h>
-// #include <stdlib.h>
-// #include <pthread.h>
-// #include <math.h>
-
-// // Define the number of threads
-// #define NUM_THREADS 2
-
-// // Mutex to protect the shared count of primes
-// pthread_mutex_t primeCountMutex;
-// int primeCount = 0;
-
-// typedef struct {
-//     int *numbers;
-//     int start;
-//     int end;
-// } ThreadData;
-
-// // Function to check if a number is prime
-// int isPrime(int n) {
-//     if (n <= 1) return 0;
-//     if (n == 2) return 1;
-//     if (n % 2 == 0) return 0;
-//     for (int i = 3; i <= sqrt(n); i += 2) {
-//         if (n % i == 0) return 0;
-//     }
-//     return 1;
-// }
-
-// // Function to process a range of numbers and count primes
-// void *processNumbers(void *arg) {
-//     ThreadData *data = (ThreadData *)arg;
-//     int localPrimeCount = 0;
-//     for (int i = data->start; i < data->end; ++i) {
-//         if (isPrime(data->numbers[i])) {
-//             ++localPrimeCount;
-//         }
-//     }
-
-//     pthread_mutex_lock(&primeCountMutex);
-//     primeCount += localPrimeCount;
-//     pthread_mutex_unlock(&primeCountMutex);
-
-//     return NULL;
-// }
-
-// int main() {
-//     // Read input numbers from stdin
-//     int *numbers = NULL;
-//     int number;
-//     size_t numbersCount = 0;
-//     size_t capacity = 10;
-//     numbers = malloc(capacity * sizeof(int));
-//     if (numbers == NULL) {
-//         perror("Unable to allocate memory");
-//         return EXIT_FAILURE;
-//     }
-
-//     while (scanf("%d", &number) != EOF) {
-//         if (numbersCount >= capacity) {
-//             capacity *= 2;
-//             numbers = realloc(numbers, capacity * sizeof(int));
-//             if (numbers == NULL) {
-//                 perror("Unable to reallocate memory");
-//                 return EXIT_FAILURE;
-//             }
-//         }
-//         numbers[numbersCount++] = number;
-//     }
-
-//     // Calculate the chunk size
-//     size_t chunkSize = (numbersCount + NUM_THREADS - 1) / NUM_THREADS; // Ensure we cover all numbers
-
-//     // Initialize the mutex
-//     pthread_mutex_init(&primeCountMutex, NULL);
-
-//     // Create and launch threads
-//     pthread_t threads[NUM_THREADS];
-//     ThreadData threadData[NUM_THREADS];
-
-//     for (unsigned int i = 0; i < NUM_THREADS; ++i) {
-//         threadData[i].numbers = numbers;
-//         threadData[i].start = i * chunkSize;
-//         threadData[i].end = (i + 1) * chunkSize;
-//         if (threadData[i].end > numbersCount) {
-//             threadData[i].end = numbersCount;
-//         }
-//         if (threadData[i].start < threadData[i].end) {
-//             pthread_create(&threads[i], NULL, processNumbers, &threadData[i]);
-//         }
-//     }
-
-//     // Wait for all threads to finish
-//     for (unsigned int i = 0; i < NUM_THREADS; ++i) {
-//         pthread_join(threads[i], NULL);
-//     }
-
-//     // Destroy the mutex
-//     pthread_mutex_destroy(&primeCountMutex);
-
-//     // Output the result
-//     printf("%d total primes.\n", primeCount);
-
-//     // Free allocated memory
-//     free(numbers);
-
-//     return 0;
-// }
-
-
-//----------------------------------------------SOLUTION 2 -----------------------------------------------------------------
+//--------------------------------------------------------------------------------------------------------------
 
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <pthread.h>
-#include <math.h>
+#include <stdbool.h>
 
-#define NUM_THREADS 4
+#define NUM_THREADS 16
+#define CHUNK_SIZE 128 // Further reduced chunk size
 
+pthread_mutex_t queueMutex;
+pthread_cond_t queueCond;
 pthread_mutex_t primeCountMutex;
 int primeCount = 0;
 
 typedef struct {
-    int *numbers;
-    int start;
-    int end;
-} ThreadData;
+    int numbers[CHUNK_SIZE];
+    int size;
+} Chunk;
 
-int isPrime(int n) {
-    if (n <= 1) return 0;
-    if (n <= 3) return 1;
-    if (n % 2 == 0 || n % 3 == 0) return 0;
+typedef struct Node {
+    Chunk chunk;
+    struct Node *next;
+} Node;
 
-    for (int i = 5; i * i <= n; i += 6) {
-        if (n % i == 0 || n % (i + 2) == 0) return 0;
+typedef struct {
+    Node *head;
+    Node *tail;
+    int size;
+} Queue;
+
+Queue queue = {NULL, NULL, 0};
+
+bool isPrime(int n) {
+    if (n <= 1) {
+        return false;
     }
-    return 1;
+    for (int i = 2; i * i <= n; i++) {
+        if (n % i == 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void enqueue(Chunk chunk) {
+    Node *newNode = (Node *)malloc(sizeof(Node));
+    newNode->chunk = chunk;
+    newNode->next = NULL;
+
+    pthread_mutex_lock(&queueMutex);
+    if (queue.tail) {
+        queue.tail->next = newNode;
+    } else {
+        queue.head = newNode;
+    }
+    queue.tail = newNode;
+    queue.size++;
+    pthread_cond_signal(&queueCond);
+    pthread_mutex_unlock(&queueMutex);
+}
+
+Chunk dequeue() {
+    pthread_mutex_lock(&queueMutex);
+    while (queue.size == 0) {
+        pthread_cond_wait(&queueCond, &queueMutex);
+    }
+
+    Node *node = queue.head;
+    queue.head = node->next;
+    if (!queue.head) {
+        queue.tail = NULL;
+    }
+    queue.size--;
+
+    Chunk chunk = node->chunk;
+    free(node);
+    pthread_mutex_unlock(&queueMutex);
+    return chunk;
 }
 
 void *processNumbers(void *arg) {
-    ThreadData *data = (ThreadData *)arg;
-    int localPrimeCount = 0;
-    for (int i = data->start; i < data->end; ++i) {
-        if (isPrime(data->numbers[i])) {
-            ++localPrimeCount;
+    while (1) {
+        Chunk chunk = dequeue();
+        if (chunk.size == 0) break; // End signal
+
+        int localPrimeCount = 0;
+        for (int i = 0; i < chunk.size; ++i) {
+            if (isPrime(chunk.numbers[i])) {
+                ++localPrimeCount;
+            }
         }
+
+        pthread_mutex_lock(&primeCountMutex);
+        primeCount += localPrimeCount;
+        pthread_mutex_unlock(&primeCountMutex);
     }
-
-    pthread_mutex_lock(&primeCountMutex);
-    primeCount += localPrimeCount;
-    pthread_mutex_unlock(&primeCountMutex);
-
     return NULL;
 }
 
 int main() {
-    int *numbers = NULL;
-    int number;
-    size_t numbersCount = 0;
-    size_t capacity = 1000000;  // Initial capacity for numbers array
-
-    numbers = malloc(capacity * sizeof(int));
-    if (numbers == NULL) {
-        perror("Unable to allocate memory");
-        return EXIT_FAILURE;
-    }
-
-    while (scanf("%d", &number) != EOF) {
-        if (numbersCount >= capacity) {
-            // Increase capacity by a smaller factor
-            capacity += 1000000;
-            numbers = realloc(numbers, capacity * sizeof(int));
-            if (numbers == NULL) {
-                perror("Unable to reallocate memory");
-                return EXIT_FAILURE;
-            }
-        }
-        numbers[numbersCount++] = number;
-    }
-
-    size_t chunkSize = (numbersCount + NUM_THREADS - 1) / NUM_THREADS;
-
+    pthread_mutex_init(&queueMutex, NULL);
+    pthread_cond_init(&queueCond, NULL);
     pthread_mutex_init(&primeCountMutex, NULL);
 
     pthread_t threads[NUM_THREADS];
-    ThreadData threadData[NUM_THREADS];
-
     for (unsigned int i = 0; i < NUM_THREADS; ++i) {
-        threadData[i].numbers = numbers;
-        threadData[i].start = i * chunkSize;
-        threadData[i].end = (i + 1) * chunkSize;
-        if (threadData[i].end > numbersCount) {
-            threadData[i].end = numbersCount;
+        pthread_create(&threads[i], NULL, processNumbers, NULL);
+    }
+
+    int number;
+    Chunk chunk = {{0}, 0};
+    while (scanf("%d", &number) != EOF) {
+        chunk.numbers[chunk.size++] = number;
+        if (chunk.size == CHUNK_SIZE) {
+            enqueue(chunk);
+            chunk.size = 0;
         }
-        if (threadData[i].start < threadData[i].end) {
-            pthread_create(&threads[i], NULL, processNumbers, &threadData[i]);
-        }
+    }
+    if (chunk.size > 0) {
+        enqueue(chunk);
+    }
+
+    // Enqueue end signals
+    for (unsigned int i = 0; i < NUM_THREADS; ++i) {
+        Chunk endSignal = {{0}, 0};
+        enqueue(endSignal);
     }
 
     for (unsigned int i = 0; i < NUM_THREADS; ++i) {
         pthread_join(threads[i], NULL);
     }
 
+    pthread_mutex_destroy(&queueMutex);
+    pthread_cond_destroy(&queueCond);
     pthread_mutex_destroy(&primeCountMutex);
 
     printf("%d total primes.\n", primeCount);
-
-    free(numbers);
 
     return 0;
 }
